@@ -27,6 +27,9 @@ torch.manual_seed(256)
 from datetime import datetime
 ## import similaritymeasures
 
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
 
 ############################################################
 
@@ -150,6 +153,36 @@ class GPTmodelRLHF:
     def printName(self):
         print( self.MyName  )
 
+    #########################################################
+    def load_some_GPT_from_HF_hub(self, model_type ="gpt2"):
+        if model_type == "gpt2":
+            self.tokenizer           = AutoTokenizer.from_pretrained(model_name)
+            self.tokenizer.pad_token = self.tokenizer.eos_token  # Add padding token for GPT-2
+            self.model = AutoModelForCausalLM.from_pretrained(
+                   self.model_name, 
+                   torch_dtype = torch.float16 if self.mixed_precision else torch.float32
+            ).cuda()
+        elif model_type == "llama":
+            self.tokenizer = LlamaTokenizer.from_pretrained( self.model_name )
+            with init_empty_weights():
+                self.model = LlamaForCausalLM.from_pretrained(
+                       model_name, 
+                       torch_dtype=torch.float16 if self.mixed_precision else torch.float32
+                )
+                self.model = load_checkpoint_and_dispatch(
+                    model, 
+                    model_name, 
+                    device_map = "auto", 
+                    offload_folder = "offload"
+                )
+        else:
+            raise ValueError("Unsupported model type. Use 'gpt2' or 'llama'.")
+
+        model.gradient_checkpointing_enable()
+
+    ##
+        
+
     
     #########################################################
     def load_GPT2_pre_trained_weights(self):
@@ -173,6 +206,46 @@ class GPTmodelRLHF:
         # Map GPT-2 weights to custom GPT model
         self.model.token_embedding.weight.data    = self.gpt2_weights["transformer.wte.weight"].clone()
         self.model.position_embedding.weight.data = self.gpt2_weights["transformer.wpe.weight"].clone()
+
+    #########################################################
+    def generate( self, input_text, max_length=50 ):
+        inputs  = tokenizer( input_text, return_tensors="pt").to("cuda")
+        outputs = self.model.generate(inputs.input_ids, max_length=max_length, pad_token_id=self.tokenizer.eos_token_id)
+        return self.tokenizer.decode( outputs[0], skip_special_tokens=True )
+
+
+    #########################################################
+    def evaluate( self, prompts, expected_answers ):
+        self.model.eval()
+        correct_answers   = 0
+        correct_reasoning = 0
+
+        for prompt, expected in zip( prompts, expected_answers ):
+            output = self.generate( prompt)
+            if self.extract_answer( output ) == self.extract_answer( expected ):
+                correct_answers += 1
+
+            steps = [ segment.strip() for segment in output.split("<think>") if "</think>" in segment ]
+            expected_steps = [ segment.strip() for segment in expected.split("<think>") if "</think>" in segment ]
+            correct_reasoning += sum( 1 for step in steps if step in expected_steps )
+
+        total_prompts      = len( prompts )
+        reasoning_accuracy = correct_reasoning / total_prompts
+        answer_accuracy    =   correct_answers / total_prompts
+
+        return {
+            "answer_accuracy": answer_accuracy,
+            "reasoning_accuracy": reasoning_accuracy,
+        }
+
+    #########################################################
+    def extract_answer( self, output_text ):
+    
+        if "[answer]" in output_text and "[/answer]" in output_text:
+            start = output_text.find("[answer]") + len("[answer]")
+            end   = output_text.find("[/answer]")
+            return output_text[start:end].strip()
+        return None
 
 
     #########################################################

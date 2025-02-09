@@ -1,1 +1,1 @@
-# cotRLHF
+# Chain of Thought RLHF
